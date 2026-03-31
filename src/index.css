@@ -1,0 +1,73 @@
+:root {
+  color-scheme: dark;
+  --bg: #091017;
+  --panel: rgba(14, 22, 32, 0.92);
+  --card: rgba(18, 28, 40, 0.96);
+  --panel-border: rgba(148, 163, 184, 0.14);
+  --ink: #f3f7fb;
+  --muted: #8da0b3;
+  --accent: #67e8f9;
+  --accent-strong: #22d3ee;
+  --display:
+    'SF Pro Display', 'Segoe UI Variable Display', 'Pretendard Variable',
+    'Avenir Next', sans-serif;
+  --body:
+    'SF Pro Text', 'Segoe UI Variable Text', 'Pretendard Variable',
+    'Avenir Next', sans-serif;
+  font-family: var(--body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background:
+    radial-gradient(circle at top left, rgba(34, 211, 238, 0.09), transparent 22%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 20%),
+    linear-gradient(180deg, #0d141d 0%, #091017 100%);
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  font-family: var(--body);
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
+    radial-gradient(circle at 20% 20%, rgba(103, 232, 249, 0.05), transparent 28%);
+}
+
+a,
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid rgba(103, 232, 249, 0.22);
+  outline-offset: 2px;
+}
+
+strong {
+  color: var(--ink);
+}
+
+#root {
+  min-height: 100vh;
+}
