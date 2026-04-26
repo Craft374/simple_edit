@@ -27,6 +27,11 @@ import {
   updateCropRect,
 } from './lib/editor'
 import type { CropHandle, EditorRect, PaintMode, Tool } from './lib/editor'
+import {
+  extractMetadataFields,
+  writeMetadataToPng,
+} from './lib/metadata'
+import type { MetadataField } from './lib/metadata'
 
 type StatusTone = 'info' | 'success' | 'error'
 
@@ -68,10 +73,18 @@ type InteractionState =
     }
 
 type DecodedImage = ImageBitmap | HTMLImageElement
+type SidebarTab = 'edit' | 'metadata'
+
+type EditableMetadataField = {
+  id: string
+  key: string
+  value: string
+}
 
 const IDLE_INTERACTION: InteractionState = { kind: 'idle' }
 
 function App() {
+  const [activeTab, setActiveTab] = useState<SidebarTab>('edit')
   const [tool, setTool] = useState<Tool>('brush')
   const [paintMode, setPaintMode] = useState<PaintMode>('fill')
   const [brushSize, setBrushSize] = useState(22)
@@ -86,6 +99,10 @@ function App() {
   const [cropDraft, setCropDraft] = useState<EditorRect | null>(null)
   const [marqueePhase, setMarqueePhase] = useState(0)
   const [dropActive, setDropActive] = useState(false)
+  const [sourceMetadataFields, setSourceMetadataFields] = useState<
+    EditableMetadataField[]
+  >([])
+  const [metadataFields, setMetadataFields] = useState<EditableMetadataField[]>([])
   const [supportsClipboardRead, setSupportsClipboardRead] = useState(false)
   const [supportsClipboardWrite, setSupportsClipboardWrite] = useState(false)
   const [modifierLabel, setModifierLabel] = useState('Ctrl')
@@ -210,6 +227,13 @@ function App() {
     setNotice('info', '선택 영역을 해제했어요.')
   }
 
+  const exportableMetadata = metadataFields
+    .map((field) => ({
+      key: field.key.trim(),
+      value: field.value.trim(),
+    }))
+    .filter((field) => field.key)
+
   const exportEditedBlob = async () => {
     const workCanvas = workCanvasRef.current
 
@@ -217,7 +241,13 @@ function App() {
       throw new Error('No image loaded')
     }
 
-    return canvasToBlob(workCanvas)
+    const pngBlob = await canvasToBlob(workCanvas)
+
+    if (!exportableMetadata.length) {
+      return pngBlob
+    }
+
+    return writeMetadataToPng(pngBlob, exportableMetadata)
   }
 
   const buildDownloadName = () => {
@@ -397,6 +427,38 @@ function App() {
     fileInputRef.current?.click()
   }
 
+  const addMetadataField = () => {
+    setMetadataFields((currentFields) => [...currentFields, createMetadataField()])
+  }
+
+  const updateMetadataField = (
+    id: string,
+    fieldName: 'key' | 'value',
+    nextValue: string,
+  ) => {
+    setMetadataFields((currentFields) =>
+      currentFields.map((field) =>
+        field.id === id ? { ...field, [fieldName]: nextValue } : field,
+      ),
+    )
+  }
+
+  const removeMetadataField = (id: string) => {
+    setMetadataFields((currentFields) =>
+      currentFields.filter((field) => field.id !== id),
+    )
+  }
+
+  const clearMetadataFields = () => {
+    setMetadataFields([])
+    setNotice('info', '출력 메타데이터를 모두 비웠어요.')
+  }
+
+  const restoreMetadataFields = () => {
+    setMetadataFields(cloneMetadataFields(sourceMetadataFields))
+    setNotice('info', '원본 메타데이터로 되돌렸어요.')
+  }
+
   const readClipboardImage = async () => {
     if (typeof navigator.clipboard?.read !== 'function') {
       return null
@@ -449,6 +511,7 @@ function App() {
     let decodedImage: DecodedImage | null = null
 
     try {
+      const extractedMetadata = await extractMetadataFields(blob)
       decodedImage = await decodeImageBlob(blob)
       const { width: naturalWidth, height: naturalHeight } =
         getDecodedImageSize(decodedImage)
@@ -473,12 +536,15 @@ function App() {
 
       const workCanvas = getOffscreenCanvas(workCanvasRef)
       copyCanvasContents(originalCanvas, workCanvas)
+      const editableMetadata = toEditableMetadataFields(extractedMetadata)
 
       startTransition(() => {
         setTool('brush')
         setPaintMode('fill')
         setSelectionRect(null)
         setCropDraft(null)
+        setSourceMetadataFields(editableMetadata)
+        setMetadataFields(cloneMetadataFields(editableMetadata))
         setImageMeta({
           name: blob instanceof File && blob.name ? blob.name : sourceLabel,
           source: sourceLabel,
@@ -1017,204 +1083,328 @@ function App() {
             </div>
           </section>
 
-          <section className="panel">
-            <div className="panel-head">
-              <p className="panel-title">도구</p>
-              <span>{toolHint}</span>
-            </div>
-
-            <div className="tool-grid">
-              <button
-                type="button"
-                className={tool === 'brush' ? 'tool-chip active' : 'tool-chip'}
-                onClick={() => setTool('brush')}
-              >
-                펜
-              </button>
-              <button
-                type="button"
-                className={tool === 'rect' ? 'tool-chip active' : 'tool-chip'}
-                onClick={() => setTool('rect')}
-              >
-                사각형 선택
-              </button>
-              <button
-                type="button"
-                className={tool === 'crop' ? 'tool-chip active' : 'tool-chip'}
-                onClick={() => setTool('crop')}
-              >
-                크롭
-              </button>
-            </div>
-
-            {tool === 'brush' && (
-              <div className="stack">
-                <div className="mode-toggle">
-                  <button
-                    type="button"
-                    className={paintMode === 'fill' ? 'mode-button active' : 'mode-button'}
-                    onClick={() => setPaintMode('fill')}
-                  >
-                    칠하기
-                  </button>
-                  <button
-                    type="button"
-                    className={paintMode === 'erase' ? 'mode-button active' : 'mode-button'}
-                    onClick={() => setPaintMode('erase')}
-                  >
-                    지우기
-                  </button>
-                </div>
-
-                <label className="slider-row">
-                  <span>브러시</span>
-                  <strong>{brushSize}px</strong>
-                </label>
-                <input
-                  className="slider"
-                  type="range"
-                  min="4"
-                  max="120"
-                  step="1"
-                  value={brushSize}
-                  onChange={(event) => setBrushSize(Number(event.target.value))}
-                />
-              </div>
-            )}
-
-            {tool === 'rect' && (
-              <div className="stack">
-                <div className="selection-grid">
-                  <button
-                    type="button"
-                    className="mode-button"
-                    onClick={() => applySelectionAction('fill')}
-                    disabled={!selectionRect}
-                  >
-                    선택 채우기
-                  </button>
-                  <button
-                    type="button"
-                    className="mode-button"
-                    onClick={() => applySelectionAction('erase')}
-                    disabled={!selectionRect}
-                  >
-                    선택 지우기
-                  </button>
-                  <button
-                    type="button"
-                    className="mode-button"
-                    onClick={clearSelection}
-                    disabled={!selectionRect}
-                  >
-                    선택 해제
-                  </button>
-                </div>
-
-                <p className="helper-line">
-                  포토샵 사각형 선택처럼 드래그해서 영역을 잡고, 안쪽을 다시 드래그하면
-                  선택을 옮길 수 있어요.
-                </p>
-              </div>
-            )}
-
-            {tool === 'crop' && imageMeta && (
-              <div className="stack">
-                <div className="mode-toggle">
-                  <button type="button" className="mode-button active" onClick={applyCrop}>
-                    크롭 적용
-                  </button>
-                  <button type="button" className="mode-button" onClick={cancelCrop}>
-                    취소
-                  </button>
-                </div>
-                <p className="helper-line">
-                  코너 핸들과 중간 핸들을 끌어 조정하고 <strong>Enter</strong>로 적용할 수
-                  있어요.
-                </p>
-              </div>
-            )}
-          </section>
-
-          <section className="panel">
-            <div className="panel-head">
-              <p className="panel-title">색상</p>
-              <span>{activeColor.toUpperCase()}</span>
-            </div>
-
-            <div className="palette-group">
-              <p className="palette-label">기본</p>
-              <div className="swatch-row">
-                {DEFAULT_PALETTE.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    aria-label={`${color} 선택`}
-                    className={
-                      activeColor.toLowerCase() === color.toLowerCase()
-                        ? 'swatch active'
-                        : 'swatch'
-                    }
-                    style={{ backgroundColor: color }}
-                    onClick={() => setActiveColor(color)}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="palette-group">
-              <p className="palette-label">내 팔레트</p>
-              <div className="swatch-row">
-                {userPalette.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    aria-label={`${color} 선택`}
-                    className={
-                      activeColor.toLowerCase() === color.toLowerCase()
-                        ? 'swatch active'
-                        : 'swatch'
-                    }
-                    style={{ backgroundColor: color }}
-                    onClick={() => setActiveColor(color)}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="color-editor">
-              <label className="color-picker">
-                <span>직접 선택</span>
-                <input
-                  type="color"
-                  value={activeColor}
-                  onChange={(event) => setActiveColor(event.target.value)}
-                />
-              </label>
-              <button type="button" className="mode-button" onClick={rememberColor}>
-                저장
-              </button>
-            </div>
-          </section>
-
-          <section className="panel panel--muted">
-            <p>{modifierLabel}+V 붙여넣기</p>
-            <p>{modifierLabel}+C 결과 복사</p>
-            <p>Delete 선택 지우기</p>
-            <p>
-              {supportsClipboardRead && supportsClipboardWrite
-                ? '클립보드 직접 연동 가능'
-                : '일부 환경에서는 파일 열기/다운로드로 자동 전환'}
-            </p>
+          <div className="tab-row">
             <button
               type="button"
-              className="text-button"
-              onClick={resetEditor}
-              disabled={!imageMeta}
+              className={activeTab === 'edit' ? 'tab-button active' : 'tab-button'}
+              onClick={() => setActiveTab('edit')}
             >
-              처음 상태로 되돌리기
+              편집
             </button>
-          </section>
+            <button
+              type="button"
+              className={activeTab === 'metadata' ? 'tab-button active' : 'tab-button'}
+              onClick={() => setActiveTab('metadata')}
+            >
+              메타데이터
+            </button>
+          </div>
+
+          {activeTab === 'edit' ? (
+            <>
+              <section className="panel">
+                <div className="panel-head">
+                  <p className="panel-title">도구</p>
+                  <span>{toolHint}</span>
+                </div>
+
+                <div className="tool-grid">
+                  <button
+                    type="button"
+                    className={tool === 'brush' ? 'tool-chip active' : 'tool-chip'}
+                    onClick={() => setTool('brush')}
+                  >
+                    펜
+                  </button>
+                  <button
+                    type="button"
+                    className={tool === 'rect' ? 'tool-chip active' : 'tool-chip'}
+                    onClick={() => setTool('rect')}
+                  >
+                    사각형 선택
+                  </button>
+                  <button
+                    type="button"
+                    className={tool === 'crop' ? 'tool-chip active' : 'tool-chip'}
+                    onClick={() => setTool('crop')}
+                  >
+                    크롭
+                  </button>
+                </div>
+
+                {tool === 'brush' && (
+                  <div className="stack">
+                    <div className="mode-toggle">
+                      <button
+                        type="button"
+                        className={
+                          paintMode === 'fill' ? 'mode-button active' : 'mode-button'
+                        }
+                        onClick={() => setPaintMode('fill')}
+                      >
+                        칠하기
+                      </button>
+                      <button
+                        type="button"
+                        className={
+                          paintMode === 'erase' ? 'mode-button active' : 'mode-button'
+                        }
+                        onClick={() => setPaintMode('erase')}
+                      >
+                        지우기
+                      </button>
+                    </div>
+
+                    <label className="slider-row">
+                      <span>브러시</span>
+                      <strong>{brushSize}px</strong>
+                    </label>
+                    <input
+                      className="slider"
+                      type="range"
+                      min="4"
+                      max="120"
+                      step="1"
+                      value={brushSize}
+                      onChange={(event) => setBrushSize(Number(event.target.value))}
+                    />
+                  </div>
+                )}
+
+                {tool === 'rect' && (
+                  <div className="stack">
+                    <div className="selection-grid">
+                      <button
+                        type="button"
+                        className="mode-button"
+                        onClick={() => applySelectionAction('fill')}
+                        disabled={!selectionRect}
+                      >
+                        선택 채우기
+                      </button>
+                      <button
+                        type="button"
+                        className="mode-button"
+                        onClick={() => applySelectionAction('erase')}
+                        disabled={!selectionRect}
+                      >
+                        선택 지우기
+                      </button>
+                      <button
+                        type="button"
+                        className="mode-button"
+                        onClick={clearSelection}
+                        disabled={!selectionRect}
+                      >
+                        선택 해제
+                      </button>
+                    </div>
+
+                    <p className="helper-line">
+                      포토샵 사각형 선택처럼 드래그해서 영역을 잡고, 안쪽을 다시
+                      드래그하면 선택을 옮길 수 있어요.
+                    </p>
+                  </div>
+                )}
+
+                {tool === 'crop' && imageMeta && (
+                  <div className="stack">
+                    <div className="mode-toggle mode-toggle--large">
+                      <button
+                        type="button"
+                        className="mode-button mode-button--large active"
+                        onClick={applyCrop}
+                      >
+                        크롭 적용
+                      </button>
+                      <button
+                        type="button"
+                        className="mode-button mode-button--large"
+                        onClick={cancelCrop}
+                      >
+                        취소
+                      </button>
+                    </div>
+                    <p className="helper-line">
+                      코너 핸들과 중간 핸들을 끌어 조정하고 <strong>Enter</strong>로
+                      적용할 수 있어요.
+                    </p>
+                  </div>
+                )}
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <p className="panel-title">색상</p>
+                  <span>{activeColor.toUpperCase()}</span>
+                </div>
+
+                <div className="palette-group">
+                  <p className="palette-label">기본</p>
+                  <div className="swatch-row">
+                    {DEFAULT_PALETTE.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        aria-label={`${color} 선택`}
+                        className={
+                          activeColor.toLowerCase() === color.toLowerCase()
+                            ? 'swatch active'
+                            : 'swatch'
+                        }
+                        style={{ backgroundColor: color }}
+                        onClick={() => setActiveColor(color)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="palette-group">
+                  <p className="palette-label">내 팔레트</p>
+                  <div className="swatch-row">
+                    {userPalette.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        aria-label={`${color} 선택`}
+                        className={
+                          activeColor.toLowerCase() === color.toLowerCase()
+                            ? 'swatch active'
+                            : 'swatch'
+                        }
+                        style={{ backgroundColor: color }}
+                        onClick={() => setActiveColor(color)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <div className="color-editor">
+                  <label className="color-picker">
+                    <span>직접 선택</span>
+                    <input
+                      type="color"
+                      value={activeColor}
+                      onChange={(event) => setActiveColor(event.target.value)}
+                    />
+                  </label>
+                  <button type="button" className="mode-button" onClick={rememberColor}>
+                    저장
+                  </button>
+                </div>
+              </section>
+
+              <section className="panel panel--muted">
+                <p>{modifierLabel}+V 붙여넣기</p>
+                <p>{modifierLabel}+C 결과 복사</p>
+                <p>Delete 선택 지우기</p>
+                <p>
+                  {supportsClipboardRead && supportsClipboardWrite
+                    ? '클립보드 직접 연동 가능'
+                    : '일부 환경에서는 파일 열기/다운로드로 자동 전환'}
+                </p>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={resetEditor}
+                  disabled={!imageMeta}
+                >
+                  처음 상태로 되돌리기
+                </button>
+              </section>
+            </>
+          ) : (
+            <>
+              <section className="panel">
+                <div className="panel-head">
+                  <p className="panel-title">메타데이터</p>
+                  <span>
+                    {metadataFields.length
+                      ? `${metadataFields.length}개 필드`
+                      : '감지된 항목 없음'}
+                  </span>
+                </div>
+
+                <div className="stack">
+                  <div className="selection-grid metadata-actions">
+                    <button
+                      type="button"
+                      className="mode-button mode-button--large"
+                      onClick={addMetadataField}
+                    >
+                      필드 추가
+                    </button>
+                    <button
+                      type="button"
+                      className="mode-button mode-button--large"
+                      onClick={restoreMetadataFields}
+                      disabled={!sourceMetadataFields.length}
+                    >
+                      원본 복원
+                    </button>
+                    <button
+                      type="button"
+                      className="mode-button mode-button--large"
+                      onClick={clearMetadataFields}
+                      disabled={!metadataFields.length}
+                    >
+                      모두 삭제
+                    </button>
+                  </div>
+
+                  <p className="helper-line">
+                    출력은 PNG 기준으로 저장되며, 여기를 비워두면 메타데이터 없이
+                    복사/다운로드됩니다.
+                  </p>
+
+                  {metadataFields.length ? (
+                    <div className="metadata-list">
+                      {metadataFields.map((field) => (
+                        <div key={field.id} className="metadata-item">
+                          <input
+                            className="metadata-input metadata-input--key"
+                            type="text"
+                            value={field.key}
+                            onChange={(event) =>
+                              updateMetadataField(field.id, 'key', event.target.value)
+                            }
+                            placeholder="키 예: Software"
+                          />
+                          <textarea
+                            className="metadata-input metadata-input--value"
+                            value={field.value}
+                            onChange={(event) =>
+                              updateMetadataField(field.id, 'value', event.target.value)
+                            }
+                            rows={3}
+                            placeholder="값"
+                          />
+                          <button
+                            type="button"
+                            className="text-button metadata-remove"
+                            onClick={() => removeMetadataField(field.id)}
+                          >
+                            삭제
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="metadata-empty">
+                      감지된 메타데이터가 없습니다. 직접 필드를 추가하거나, 이 상태로
+                      출력하면 메타데이터 없이 나갑니다.
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section className="panel panel--muted">
+                <p>원본에 PNG 텍스트/일부 JPEG EXIF가 있으면 읽어서 표시합니다.</p>
+                <p>수정한 항목은 복사/다운로드 시 출력 PNG에 반영됩니다.</p>
+                <p>모두 삭제하면 메타데이터 없는 결과물로 내보냅니다.</p>
+              </section>
+            </>
+          )}
         </aside>
 
         <section className="stage-column">
@@ -1350,6 +1540,33 @@ function disposeDecodedImage(image: DecodedImage | null) {
   if (image && 'close' in image) {
     image.close()
   }
+}
+
+function createMetadataField(
+  key = '',
+  value = '',
+): EditableMetadataField {
+  return {
+    id: createMetadataId(),
+    key,
+    value,
+  }
+}
+
+function createMetadataId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  return `metadata-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function toEditableMetadataFields(fields: MetadataField[]) {
+  return fields.map((field) => createMetadataField(field.key, field.value))
+}
+
+function cloneMetadataFields(fields: EditableMetadataField[]) {
+  return fields.map((field) => createMetadataField(field.key, field.value))
 }
 
 export default App
