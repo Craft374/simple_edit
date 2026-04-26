@@ -1041,9 +1041,29 @@ function App() {
       <main className="workspace">
         <aside className="sidebar">
           <div className="sidebar-head">
-            <div>
-              <p className="brand-label">Simple Edit</p>
-              <h1>빠르게 가리고 복사</h1>
+            <div className="sidebar-head__main">
+              <div>
+                <p className="brand-label">Simple Edit</p>
+                <h1>빠르게 가리고 복사</h1>
+              </div>
+              <a
+                className="github-link"
+                href="https://github.com/Craft374/simple_edit"
+                target="_blank"
+                rel="noreferrer"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                  className="github-link__icon"
+                >
+                  <path
+                    fill="currentColor"
+                    d="M12 1.25a10.75 10.75 0 0 0-3.4 20.95c.54.1.73-.23.73-.52 0-.25-.01-1.08-.02-1.96-2.98.65-3.6-1.26-3.6-1.26-.48-1.22-1.18-1.54-1.18-1.54-.97-.66.08-.65.08-.65 1.07.08 1.63 1.1 1.63 1.1.96 1.63 2.5 1.16 3.11.89.1-.69.38-1.17.68-1.44-2.38-.27-4.88-1.19-4.88-5.29 0-1.17.42-2.12 1.1-2.87-.11-.27-.48-1.37.11-2.86 0 0 .9-.29 2.95 1.1A10.2 10.2 0 0 1 12 6.42c.91 0 1.82.12 2.68.35 2.05-1.39 2.95-1.1 2.95-1.1.59 1.49.22 2.59.11 2.86.68.75 1.1 1.7 1.1 2.87 0 4.11-2.5 5.01-4.89 5.28.39.34.73 1 .73 2.03 0 1.47-.01 2.66-.01 3.02 0 .29.19.63.74.52A10.75 10.75 0 0 0 12 1.25Z"
+                  />
+                </svg>
+                <span>GitHub</span>
+              </a>
             </div>
             <p className="meta-line">
               {imageMeta

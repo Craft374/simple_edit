@@ -17,11 +17,16 @@
 }
 
 .sidebar-head {
+  display: grid;
+  gap: 10px;
+  padding: 14px 4px 4px;
+}
+
+.sidebar-head__main {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
-  padding: 14px 4px 4px;
 }
 
 .brand-label {
@@ -45,7 +50,34 @@
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 0.84rem;
-  white-space: nowrap;
+}
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  background: rgba(14, 22, 32, 0.92);
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 700;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.github-link:hover {
+  transform: translateY(-1px);
+  border-color: rgba(103, 232, 249, 0.26);
+  background: rgba(18, 28, 40, 0.96);
+}
+
+.github-link__icon {
+  width: 18px;
+  height: 18px;
 }
 
 .panel {
