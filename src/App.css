@@ -1,19 +1,24 @@
 .app-shell {
   width: min(1480px, calc(100% - 28px));
   margin: 0 auto;
-  padding: 18px 0 40px;
+  height: 100svh;
+  padding: 12px 0;
 }
 
 .workspace {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
+  height: 100%;
+  min-height: 0;
 }
 
 .sidebar {
   display: grid;
-  gap: 14px;
+  gap: 10px;
+  align-content: start;
+  min-height: 0;
 }
 
 .sidebar-head {
@@ -81,7 +86,7 @@
 }
 
 .panel {
-  padding: 16px;
+  padding: 14px;
   border: 1px solid var(--panel-border);
   border-radius: 22px;
   background: var(--panel);
@@ -138,7 +143,7 @@
 }
 
 .action-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .tool-grid {
@@ -190,8 +195,8 @@
 }
 
 .action-button {
-  min-height: 52px;
-  padding: 14px 16px;
+  min-height: 48px;
+  padding: 13px 14px;
   text-align: center;
   font-weight: 700;
 }
@@ -227,8 +232,8 @@
 
 .stack {
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .helper-line {
@@ -333,8 +338,8 @@
 
 .metadata-item {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 8px;
+  padding: 10px;
   border: 1px solid rgba(148, 163, 184, 0.12);
   border-radius: 16px;
   background: rgba(11, 19, 28, 0.72);
@@ -373,15 +378,19 @@
 
 .stage-column {
   min-width: 0;
+  min-height: 0;
+  display: flex;
 }
 
 .canvas-shell {
   position: relative;
-  min-height: calc(100vh - 72px);
+  flex: 1;
+  min-height: 0;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 22px;
+  padding: 18px;
   border: 1px solid var(--panel-border);
   border-radius: 28px;
   background:
@@ -424,7 +433,7 @@
   z-index: 1;
   display: block;
   max-width: 100%;
-  max-height: min(86svh, 1200px);
+  max-height: calc(100% - 82px);
   width: auto;
   height: auto;
   border-radius: 18px;
@@ -556,6 +565,7 @@
 @media (max-width: 1080px) {
   .workspace {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .stage-column {
@@ -568,12 +578,14 @@
 
   .canvas-shell {
     min-height: 62svh;
+    height: auto;
   }
 }
 
 @media (max-width: 720px) {
   .app-shell {
     width: min(100% - 16px, 100%);
+    height: auto;
     padding-top: 12px;
   }
 
@@ -595,6 +607,7 @@
 
   .canvas-shell {
     min-height: 54svh;
+    height: auto;
     padding: 14px;
   }
 

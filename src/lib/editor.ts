@@ -28,6 +28,13 @@ type StrokeOptions = {
   to: { x: number; y: number }
 }
 
+type BrushPreviewOptions = {
+  mode: PaintMode
+  color: string
+  size: number
+  point: { x: number; y: number }
+}
+
 export const MAX_IMAGE_DIMENSION = 4096
 export const MIN_CROP_SIZE = 24
 
@@ -360,6 +367,35 @@ export function drawMarqueeSelection(
   context.restore()
 }
 
+export function drawBrushPreview(
+  context: CanvasRenderingContext2D,
+  options: BrushPreviewOptions,
+  uiScale = 1,
+) {
+  const radius = Math.max(options.size / 2, 2)
+  const lineWidth = Math.max(1.3 * uiScale, 1)
+
+  context.save()
+  context.beginPath()
+  context.arc(options.point.x, options.point.y, radius, 0, Math.PI * 2)
+  context.fillStyle =
+    options.mode === 'erase'
+      ? 'rgba(255, 255, 255, 0.06)'
+      : toAlpha(options.color, 0.16)
+  context.fill()
+
+  context.lineWidth = lineWidth
+  context.strokeStyle = 'rgba(255, 255, 255, 0.98)'
+  context.stroke()
+
+  context.beginPath()
+  context.arc(options.point.x, options.point.y, Math.max(radius - lineWidth * 1.8, 1), 0, Math.PI * 2)
+  context.strokeStyle =
+    options.mode === 'erase' ? 'rgba(7, 10, 17, 0.92)' : toAlpha(options.color, 0.92)
+  context.stroke()
+  context.restore()
+}
+
 export function drawCropOverlay(
   context: CanvasRenderingContext2D,
   rect: EditorRect,
@@ -478,4 +514,26 @@ function drawCornerHandle(
   }
 
   context.stroke()
+}
+
+function toAlpha(color: string, alpha: number) {
+  const hex = color.replace('#', '')
+
+  if (hex.length !== 3 && hex.length !== 6) {
+    return `rgba(103, 232, 249, ${alpha})`
+  }
+
+  const safeHex =
+    hex.length === 3
+      ? hex
+          .split('')
+          .map((character) => `${character}${character}`)
+          .join('')
+      : hex
+
+  const red = Number.parseInt(safeHex.slice(0, 2), 16)
+  const green = Number.parseInt(safeHex.slice(2, 4), 16)
+  const blue = Number.parseInt(safeHex.slice(4, 6), 16)
+
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`
 }

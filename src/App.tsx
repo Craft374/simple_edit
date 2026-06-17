@@ -14,6 +14,7 @@ import {
   canvasToBlob,
   constrainRectToBounds,
   copyCanvasContents,
+  drawBrushPreview,
   drawCropOverlay,
   drawMarqueeSelection,
   fitDimensionsToLimit,
@@ -81,6 +82,16 @@ type EditableMetadataField = {
   value: string
 }
 
+type BrushPreviewPoint = {
+  x: number
+  y: number
+}
+
+type HistoryEntry = {
+  canvas: HTMLCanvasElement
+  imageMeta: ImageMeta
+}
+
 const IDLE_INTERACTION: InteractionState = { kind: 'idle' }
 
 function App() {
@@ -99,6 +110,7 @@ function App() {
   const [cropDraft, setCropDraft] = useState<EditorRect | null>(null)
   const [marqueePhase, setMarqueePhase] = useState(0)
   const [dropActive, setDropActive] = useState(false)
+  const [undoCount, setUndoCount] = useState(0)
   const [sourceMetadataFields, setSourceMetadataFields] = useState<
     EditableMetadataField[]
   >([])
@@ -112,6 +124,8 @@ function App() {
   const workCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const interactionRef = useRef<InteractionState>(IDLE_INTERACTION)
+  const brushPreviewRef = useRef<BrushPreviewPoint | null>(null)
+  const undoStackRef = useRef<HistoryEntry[]>([])
 
   const getOffscreenCanvas = (ref: typeof workCanvasRef) => {
     if (!ref.current) {
@@ -169,6 +183,19 @@ function App() {
 
     const uiScale = getUiScale(displayCanvas)
 
+    if (tool === 'brush' && brushPreviewRef.current) {
+      drawBrushPreview(
+        context,
+        {
+          mode: paintMode,
+          color: activeColor,
+          size: brushSize,
+          point: brushPreviewRef.current,
+        },
+        uiScale,
+      )
+    }
+
     if (tool === 'rect' && selectionRect) {
       drawMarqueeSelection(context, selectionRect, marqueePhase, uiScale)
     }
@@ -206,6 +233,64 @@ function App() {
     })
   }
 
+  const clearUndoHistory = () => {
+    undoStackRef.current = []
+    setUndoCount(0)
+  }
+
+  const pushUndoSnapshot = () => {
+    const workCanvas = workCanvasRef.current
+
+    if (!workCanvas || !imageMeta) {
+      return
+    }
+
+    const snapshotCanvas = document.createElement('canvas')
+    copyCanvasContents(workCanvas, snapshotCanvas)
+    undoStackRef.current = [
+      ...undoStackRef.current,
+      {
+        canvas: snapshotCanvas,
+        imageMeta: { ...imageMeta },
+      },
+    ].slice(-40)
+    setUndoCount(undoStackRef.current.length)
+  }
+
+  const undoLastChange = () => {
+    const workCanvas = workCanvasRef.current
+    const historyEntry = undoStackRef.current.pop()
+
+    if (!workCanvas || !historyEntry) {
+      return
+    }
+
+    copyCanvasContents(historyEntry.canvas, workCanvas)
+    interactionRef.current = IDLE_INTERACTION
+    setUndoCount(undoStackRef.current.length)
+    setSelectionRect(null)
+    startTransition(() => {
+      setImageMeta(historyEntry.imageMeta)
+      setCropDraft(
+        tool === 'crop'
+          ? {
+              x: 0,
+              y: 0,
+              width: historyEntry.imageMeta.width,
+              height: historyEntry.imageMeta.height,
+            }
+          : null,
+      )
+    })
+    redrawCanvas()
+    setNotice('success', '이전 편집으로 되돌렸어요.')
+  }
+
+  const setBrushPreview = (point: BrushPreviewPoint | null) => {
+    brushPreviewRef.current = point
+    redrawCanvas()
+  }
+
   const applySelectionAction = (mode: PaintMode) => {
     const workCanvas = workCanvasRef.current
     const context = workCanvas?.getContext('2d')
@@ -214,6 +299,7 @@ function App() {
       return
     }
 
+    pushUndoSnapshot()
     paintRect(context, selectionRect, mode, activeColor)
     redrawCanvas()
     setNotice(
@@ -343,6 +429,7 @@ function App() {
       return
     }
 
+    pushUndoSnapshot()
     croppedContext.drawImage(
       workCanvas,
       nextCrop.x,
@@ -393,6 +480,7 @@ function App() {
       return
     }
 
+    pushUndoSnapshot()
     copyCanvasContents(originalCanvas, workCanvas)
 
     startTransition(() => {
@@ -537,6 +625,8 @@ function App() {
       const workCanvas = getOffscreenCanvas(workCanvasRef)
       copyCanvasContents(originalCanvas, workCanvas)
       const editableMetadata = toEditableMetadataFields(extractedMetadata)
+      brushPreviewRef.current = null
+      clearUndoHistory()
 
       startTransition(() => {
         setTool('brush')
@@ -624,6 +714,7 @@ function App() {
     if (!imageMeta) {
       setSelectionRect(null)
       setCropDraft(null)
+      brushPreviewRef.current = null
       return
     }
 
@@ -640,6 +731,10 @@ function App() {
 
     if (tool !== 'rect') {
       setSelectionRect(null)
+    }
+
+    if (tool !== 'brush') {
+      brushPreviewRef.current = null
     }
   }, [imageMeta, tool])
 
@@ -696,6 +791,12 @@ function App() {
     ) {
       event.preventDefault()
       void copyEditedImage('shortcut')
+      return
+    }
+
+    if ((event.metaKey || event.ctrlKey) && key === 'z' && imageMeta) {
+      event.preventDefault()
+      undoLastChange()
       return
     }
 
@@ -770,6 +871,8 @@ function App() {
     event.currentTarget.setPointerCapture(event.pointerId)
 
     if (tool === 'brush') {
+      pushUndoSnapshot()
+      setBrushPreview(point)
       paintBrushSegment(point.x, point.y, point.x, point.y)
       interactionRef.current = {
         kind: 'brush',
@@ -843,17 +946,25 @@ function App() {
   }
 
   const handleCanvasPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const point = getCanvasPoint(event)
+
+    if (tool === 'brush') {
+      brushPreviewRef.current = point
+    }
+
     const activeInteraction = interactionRef.current
 
     if (
       activeInteraction.kind === 'idle' ||
       activeInteraction.pointerId !== event.pointerId
     ) {
+      if (tool === 'brush') {
+        redrawCanvas()
+      }
       return
     }
 
     event.preventDefault()
-    const point = getCanvasPoint(event)
 
     if (activeInteraction.kind === 'brush') {
       paintBrushSegment(
@@ -932,6 +1043,10 @@ function App() {
 
     const point = getCanvasPoint(event)
 
+    if (tool === 'brush') {
+      brushPreviewRef.current = point
+    }
+
     if (activeInteraction.kind === 'rect' && imageMeta) {
       const nextSelection =
         activeInteraction.mode === 'move'
@@ -985,6 +1100,13 @@ function App() {
 
     interactionRef.current = IDLE_INTERACTION
     redrawCanvas()
+  }
+
+  const handleCanvasPointerLeave = () => {
+    if (interactionRef.current.kind === 'idle') {
+      brushPreviewRef.current = null
+      redrawCanvas()
+    }
   }
 
   const handleStageDrop = (event: DragEvent<HTMLElement>) => {
@@ -1075,9 +1197,9 @@ function App() {
           <section className="panel action-panel">
             <div className="action-grid">
               <button
-                type="button"
-                className="action-button primary"
-                onClick={handlePasteButton}
+                  type="button"
+                  className="action-button primary"
+                  onClick={handlePasteButton}
               >
                 붙여넣기
               </button>
@@ -1091,6 +1213,14 @@ function App() {
                 disabled={!imageMeta}
               >
                 복사
+              </button>
+              <button
+                type="button"
+                className="action-button"
+                onClick={undoLastChange}
+                disabled={!undoCount}
+              >
+                되돌리기
               </button>
               <button
                 type="button"
@@ -1317,6 +1447,7 @@ function App() {
               <section className="panel panel--muted">
                 <p>{modifierLabel}+V 붙여넣기</p>
                 <p>{modifierLabel}+C 결과 복사</p>
+                <p>{modifierLabel}+Z 되돌리기</p>
                 <p>Delete 선택 지우기</p>
                 <p>
                   {supportsClipboardRead && supportsClipboardWrite
@@ -1444,6 +1575,7 @@ function App() {
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={finishPointerInteraction}
                   onPointerCancel={cancelPointerInteraction}
+                  onPointerLeave={handleCanvasPointerLeave}
                 />
 
                 <div className="canvas-hud canvas-hud--top">
