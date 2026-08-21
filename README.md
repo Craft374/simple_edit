@@ -1,75 +1,38 @@
-# React + TypeScript + Vite
+# Simple Edit
 
-https://craft374.github.io/simple_edit/
+이미지를 붙여넣고 필요한 부분을 빠르게 가린 뒤 복사하는 웹 편집기입니다.
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+스크린샷의 개인정보를 간단히 가리기 위해 제작했습니다.
 
-Currently, two official plugins are available:
+## 사용 링크
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- 배포: https://craft374.github.io/simple_edit/
 
-## React Compiler
+## 완료
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- 클립보드 붙여넣기, 파일 열기, 드래그 앤 드롭
+- 칠하기, 지우기, 모자이크 브러시
+- 사각형 선택과 크롭
+- 되돌리기, PNG 복사와 다운로드
+- PNG 텍스트 및 일부 JPEG EXIF 메타데이터 편집
 
-## Expanding the ESLint configuration
+## 실행 방법
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 사용 기술
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- TypeScript
+- React
+- Vite
+- Canvas API
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## 참고
+
+- 이미지는 서버로 전송하지 않고 브라우저 안에서 처리합니다.
+- 브라우저 권한에 따라 클립보드 대신 파일 열기나 다운로드로 전환됩니다.
+- 긴 변이 4096px을 넘는 이미지는 편집 성능을 위해 축소됩니다.
+- 모자이크는 시각적 가림용입니다. 민감한 정보는 칠하기로 완전히 가리는 편이 안전합니다.

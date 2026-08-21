@@ -1,5 +1,5 @@
 export type Tool = 'brush' | 'rect' | 'crop'
-export type PaintMode = 'fill' | 'erase'
+export type PaintMode = 'fill' | 'erase' | 'mosaic'
 
 export type EditorRect = {
   x: number
@@ -300,6 +300,11 @@ export function updateCropRect(
 }
 
 export function paintStroke(context: CanvasRenderingContext2D, options: StrokeOptions) {
+  if (options.mode === 'mosaic') {
+    paintMosaicStroke(context, options)
+    return
+  }
+
   context.save()
   context.globalCompositeOperation =
     options.mode === 'erase' ? 'destination-out' : 'source-over'
@@ -321,6 +326,104 @@ export function paintStroke(context: CanvasRenderingContext2D, options: StrokeOp
   }
 
   context.restore()
+}
+
+function paintMosaicStroke(
+  context: CanvasRenderingContext2D,
+  options: StrokeOptions,
+) {
+  const blockSize = Math.max(4, Math.round(options.size / 6))
+  const radius = options.size / 2
+  const left = Math.max(
+    0,
+    Math.floor((Math.min(options.from.x, options.to.x) - radius) / blockSize) *
+      blockSize,
+  )
+  const top = Math.max(
+    0,
+    Math.floor((Math.min(options.from.y, options.to.y) - radius) / blockSize) *
+      blockSize,
+  )
+  const right = Math.min(
+    context.canvas.width,
+    Math.ceil((Math.max(options.from.x, options.to.x) + radius) / blockSize) *
+      blockSize,
+  )
+  const bottom = Math.min(
+    context.canvas.height,
+    Math.ceil((Math.max(options.from.y, options.to.y) + radius) / blockSize) *
+      blockSize,
+  )
+
+  if (right <= left || bottom <= top) {
+    return
+  }
+
+  const imageData = context.getImageData(left, top, right - left, bottom - top)
+  const source = new Uint8ClampedArray(imageData.data)
+  const segmentX = options.to.x - options.from.x
+  const segmentY = options.to.y - options.from.y
+  const segmentLengthSquared = segmentX ** 2 + segmentY ** 2
+  const radiusSquared = radius ** 2
+
+  for (let blockY = top; blockY < bottom; blockY += blockSize) {
+    for (let blockX = left; blockX < right; blockX += blockSize) {
+      const blockRight = Math.min(blockX + blockSize, right)
+      const blockBottom = Math.min(blockY + blockSize, bottom)
+      let red = 0
+      let green = 0
+      let blue = 0
+      let alpha = 0
+      let pixelCount = 0
+
+      for (let y = blockY; y < blockBottom; y += 1) {
+        for (let x = blockX; x < blockRight; x += 1) {
+          const index = ((y - top) * imageData.width + x - left) * 4
+          const pixelAlpha = source[index + 3]
+          red += source[index] * pixelAlpha
+          green += source[index + 1] * pixelAlpha
+          blue += source[index + 2] * pixelAlpha
+          alpha += pixelAlpha
+          pixelCount += 1
+        }
+      }
+
+      const averageRed = alpha ? Math.round(red / alpha) : 0
+      const averageGreen = alpha ? Math.round(green / alpha) : 0
+      const averageBlue = alpha ? Math.round(blue / alpha) : 0
+      const averageAlpha = Math.round(alpha / pixelCount)
+
+      for (let y = blockY; y < blockBottom; y += 1) {
+        for (let x = blockX; x < blockRight; x += 1) {
+          const pointX = x + 0.5
+          const pointY = y + 0.5
+          const progress = segmentLengthSquared
+            ? clamp(
+                ((pointX - options.from.x) * segmentX +
+                  (pointY - options.from.y) * segmentY) /
+                  segmentLengthSquared,
+                0,
+                1,
+              )
+            : 0
+          const nearestX = options.from.x + segmentX * progress
+          const nearestY = options.from.y + segmentY * progress
+
+          if ((pointX - nearestX) ** 2 + (pointY - nearestY) ** 2 > radiusSquared) {
+            continue
+          }
+
+          const index = ((y - top) * imageData.width + x - left) * 4
+          imageData.data[index] = averageRed
+          imageData.data[index + 1] = averageGreen
+          imageData.data[index + 2] = averageBlue
+          imageData.data[index + 3] = averageAlpha
+        }
+      }
+    }
+  }
+
+  context.putImageData(imageData, left, top)
 }
 
 export function paintRect(
@@ -374,6 +477,7 @@ export function drawBrushPreview(
 ) {
   const radius = Math.max(options.size / 2, 2)
   const lineWidth = Math.max(1.3 * uiScale, 1)
+  const previewColor = options.mode === 'mosaic' ? '#67e8f9' : options.color
 
   context.save()
   context.beginPath()
@@ -381,7 +485,7 @@ export function drawBrushPreview(
   context.fillStyle =
     options.mode === 'erase'
       ? 'rgba(255, 255, 255, 0.06)'
-      : toAlpha(options.color, 0.16)
+      : toAlpha(previewColor, 0.16)
   context.fill()
 
   context.lineWidth = lineWidth
@@ -391,7 +495,7 @@ export function drawBrushPreview(
   context.beginPath()
   context.arc(options.point.x, options.point.y, Math.max(radius - lineWidth * 1.8, 1), 0, Math.PI * 2)
   context.strokeStyle =
-    options.mode === 'erase' ? 'rgba(7, 10, 17, 0.92)' : toAlpha(options.color, 0.92)
+    options.mode === 'erase' ? 'rgba(7, 10, 17, 0.92)' : toAlpha(previewColor, 0.92)
   context.stroke()
   context.restore()
 }

@@ -1146,6 +1146,8 @@ function App() {
       ? '핸들을 끌어 크롭 영역을 조정하세요.'
       : tool === 'rect'
         ? '드래그로 선택한 뒤 채우거나 지우세요.'
+        : paintMode === 'mosaic'
+          ? '브러시로 필요한 부분만 모자이크할 수 있어요.'
         : paintMode === 'erase'
           ? '브러시로 바로 지울 수 있어요.'
           : '브러시로 바로 칠할 수 있어요.'
@@ -1284,7 +1286,7 @@ function App() {
 
                 {tool === 'brush' && (
                   <div className="stack">
-                    <div className="mode-toggle">
+                    <div className="mode-toggle mode-toggle--brush">
                       <button
                         type="button"
                         className={
@@ -1302,6 +1304,15 @@ function App() {
                         onClick={() => setPaintMode('erase')}
                       >
                         지우기
+                      </button>
+                      <button
+                        type="button"
+                        className={
+                          paintMode === 'mosaic' ? 'mode-button active' : 'mode-button'
+                        }
+                        onClick={() => setPaintMode('mosaic')}
+                      >
+                        모자이크
                       </button>
                     </div>
 
