@@ -1,56 +1,74 @@
 :root {
-  color-scheme: dark;
-  --bg: #091017;
-  --panel: rgba(14, 22, 32, 0.92);
-  --card: rgba(18, 28, 40, 0.96);
-  --panel-border: rgba(148, 163, 184, 0.14);
-  --ink: #f3f7fb;
-  --muted: #8da0b3;
-  --accent: #67e8f9;
-  --accent-strong: #22d3ee;
-  --display:
-    'SF Pro Display', 'Segoe UI Variable Display', 'Pretendard Variable',
-    'Avenir Next', sans-serif;
-  --body:
-    'SF Pro Text', 'Segoe UI Variable Text', 'Pretendard Variable',
-    'Avenir Next', sans-serif;
+  color-scheme: light;
+  --bg: #f5f5f7;
+  --panel: rgba(255, 255, 255, 0.78);
+  --card: rgba(255, 255, 255, 0.92);
+  --panel-border: rgba(0, 0, 0, 0.08);
+  --ink: #1d1d1f;
+  --muted: #6e6e73;
+  --accent: #0071e3;
+  --accent-soft: rgba(0, 113, 227, 0.1);
+  --hover: rgba(0, 0, 0, 0.045);
+  --field: rgba(255, 255, 255, 0.86);
+  --stage: #e8e8ed;
+  --checker: rgba(0, 0, 0, 0.045);
+  --hud: rgba(255, 255, 255, 0.78);
+  --shadow: 0 10px 35px rgba(0, 0, 0, 0.08);
+  --display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Pretendard',
+    'Segoe UI', sans-serif;
+  --body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Pretendard',
+    'Segoe UI', sans-serif;
   font-family: var(--body);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background:
-    radial-gradient(circle at top left, rgba(34, 211, 238, 0.09), transparent 22%),
-    radial-gradient(circle at top right, rgba(59, 130, 246, 0.08), transparent 20%),
-    linear-gradient(180deg, #0d141d 0%, #091017 100%);
+  background: var(--bg);
   color: var(--ink);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0b0b0c;
+  --panel: rgba(30, 30, 32, 0.82);
+  --card: rgba(45, 45, 48, 0.92);
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --ink: #f5f5f7;
+  --muted: #a1a1a6;
+  --accent: #0a84ff;
+  --accent-soft: rgba(10, 132, 255, 0.16);
+  --hover: rgba(255, 255, 255, 0.07);
+  --field: rgba(18, 18, 20, 0.78);
+  --stage: #171719;
+  --checker: rgba(255, 255, 255, 0.045);
+  --hud: rgba(28, 28, 30, 0.78);
+  --shadow: 0 16px 44px rgba(0, 0, 0, 0.32);
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
 html {
   height: 100%;
-  min-height: 100%;
+  background: var(--bg);
 }
 
 body {
   height: 100svh;
-  min-height: 100vh;
   margin: 0;
-  font-family: var(--body);
   overflow: hidden;
-}
-
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
-    radial-gradient(circle at 20% 20%, rgba(103, 232, 249, 0.05), transparent 28%);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--body);
+  transition: background-color 180ms ease, color 180ms ease;
 }
 
 a,
@@ -62,8 +80,10 @@ select {
 }
 
 button:focus-visible,
-input:focus-visible {
-  outline: 3px solid rgba(103, 232, 249, 0.22);
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 26%, transparent);
   outline-offset: 2px;
 }
 
@@ -73,11 +93,20 @@ strong {
 
 #root {
   height: 100%;
-  min-height: 100vh;
 }
 
 @media (max-width: 1080px) {
   body {
+    height: auto;
     overflow: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }

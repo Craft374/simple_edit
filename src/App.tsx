@@ -11,6 +11,7 @@ import {
   DEFAULT_PALETTE,
   INITIAL_USER_PALETTE,
   MAX_IMAGE_DIMENSION,
+  appendHistoryEntry,
   canvasToBlob,
   constrainRectToBounds,
   copyCanvasContents,
@@ -24,7 +25,6 @@ import {
   paintRect,
   paintStroke,
   pointInRect,
-  sanitizeRect,
   updateCropRect,
 } from './lib/editor'
 import type { CropHandle, EditorRect, PaintMode, Tool } from './lib/editor'
@@ -74,7 +74,7 @@ type InteractionState =
     }
 
 type DecodedImage = ImageBitmap | HTMLImageElement
-type SidebarTab = 'edit' | 'metadata'
+type SidebarTab = 'edit' | 'history' | 'metadata'
 
 type EditableMetadataField = {
   id: string
@@ -87,18 +87,36 @@ type BrushPreviewPoint = {
   y: number
 }
 
-type HistoryEntry = {
+type Theme = 'light' | 'dark'
+
+type EditorLayer = {
+  id: string
+  name: string
+  visible: boolean
   canvas: HTMLCanvasElement
-  imageMeta: ImageMeta
 }
 
+type LayerInfo = Omit<EditorLayer, 'canvas'>
+
+type HistoryEntry = {
+  id: string
+  label: string
+  layers: EditorLayer[]
+  imageMeta: ImageMeta
+  activeLayerId: string
+}
+
+type HistoryItem = Pick<HistoryEntry, 'id' | 'label'>
+
 const IDLE_INTERACTION: InteractionState = { kind: 'idle' }
+const HISTORY_LIMIT = 20
 
 function App() {
   const [activeTab, setActiveTab] = useState<SidebarTab>('edit')
   const [tool, setTool] = useState<Tool>('brush')
   const [paintMode, setPaintMode] = useState<PaintMode>('fill')
   const [brushSize, setBrushSize] = useState(22)
+  const [mosaicPixelSize, setMosaicPixelSize] = useState(12)
   const [activeColor, setActiveColor] = useState('#0f172a')
   const [userPalette, setUserPalette] = useState(INITIAL_USER_PALETTE)
   const [imageMeta, setImageMeta] = useState<ImageMeta | null>(null)
@@ -108,9 +126,12 @@ function App() {
   })
   const [selectionRect, setSelectionRect] = useState<EditorRect | null>(null)
   const [cropDraft, setCropDraft] = useState<EditorRect | null>(null)
-  const [marqueePhase, setMarqueePhase] = useState(0)
   const [dropActive, setDropActive] = useState(false)
-  const [undoCount, setUndoCount] = useState(0)
+  const [historyItems, setHistoryItems] = useState<HistoryItem[]>([])
+  const [historyIndex, setHistoryIndex] = useState(-1)
+  const [layers, setLayers] = useState<LayerInfo[]>([])
+  const [activeLayerId, setActiveLayerId] = useState<string | null>(null)
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [sourceMetadataFields, setSourceMetadataFields] = useState<
     EditableMetadataField[]
   >([])
@@ -125,7 +146,13 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const interactionRef = useRef<InteractionState>(IDLE_INTERACTION)
   const brushPreviewRef = useRef<BrushPreviewPoint | null>(null)
-  const undoStackRef = useRef<HistoryEntry[]>([])
+  const layersRef = useRef<EditorLayer[]>([])
+  const activeLayerIdRef = useRef<string | null>(null)
+  const historyRef = useRef<HistoryEntry[]>([])
+  const historyIndexRef = useRef(-1)
+  const marqueePhaseRef = useRef(0)
+  const drawFrameRef = useRef<number | null>(null)
+  const compositeDirtyRef = useRef(true)
 
   const getOffscreenCanvas = (ref: typeof workCanvasRef) => {
     if (!ref.current) {
@@ -149,9 +176,86 @@ function App() {
     setStatus({ tone, message })
   }
 
+  const syncLayers = (
+    nextLayers: EditorLayer[],
+    nextActiveLayerId = activeLayerIdRef.current,
+  ) => {
+    const resolvedActiveLayerId = nextLayers.some(
+      (layer) => layer.id === nextActiveLayerId,
+    )
+      ? nextActiveLayerId
+      : (nextLayers.at(-1)?.id ?? null)
+
+    layersRef.current = nextLayers
+    compositeDirtyRef.current = true
+    activeLayerIdRef.current = resolvedActiveLayerId
+    setLayers(
+      nextLayers.map(({ id, name, visible }) => ({ id, name, visible })),
+    )
+    setActiveLayerId(resolvedActiveLayerId)
+  }
+
+  const getActiveLayer = () =>
+    layersRef.current.find((layer) => layer.id === activeLayerIdRef.current) ?? null
+
+  const prepareActiveLayerForEdit = () => {
+    syncLayers(
+      layersRef.current.map((layer) => {
+        if (layer.id !== activeLayerIdRef.current) {
+          return layer
+        }
+
+        const canvas = createCanvas(layer.canvas.width, layer.canvas.height)
+        copyCanvasContents(layer.canvas, canvas)
+        return { ...layer, canvas }
+      }),
+    )
+  }
+
+  const renderComposite = () => {
+    const editorLayers = layersRef.current
+
+    if (!editorLayers.length) {
+      return null
+    }
+
+    const workCanvas = getOffscreenCanvas(workCanvasRef)
+    const { width, height } = editorLayers[0].canvas
+
+    if (
+      !compositeDirtyRef.current &&
+      workCanvas.width === width &&
+      workCanvas.height === height
+    ) {
+      return workCanvas
+    }
+
+    if (workCanvas.width !== width || workCanvas.height !== height) {
+      workCanvas.width = width
+      workCanvas.height = height
+    }
+
+    const context = workCanvas.getContext('2d')
+
+    if (!context) {
+      return null
+    }
+
+    context.clearRect(0, 0, width, height)
+    editorLayers.forEach((layer) => {
+      if (layer.visible) {
+        context.drawImage(layer.canvas, 0, 0)
+      }
+    })
+
+    compositeDirtyRef.current = false
+
+    return workCanvas
+  }
+
   const redrawCanvas = () => {
     const displayCanvas = displayCanvasRef.current
-    const workCanvas = workCanvasRef.current
+    const workCanvas = renderComposite()
 
     if (!displayCanvas) {
       return
@@ -170,16 +274,23 @@ function App() {
       return
     }
 
+    const cropPadding =
+      tool === 'crop'
+        ? getCropPreviewPadding(workCanvas.width, workCanvas.height)
+        : { x: 0, y: 0 }
+    const displayWidth = workCanvas.width + cropPadding.x * 2
+    const displayHeight = workCanvas.height + cropPadding.y * 2
+
     if (
-      displayCanvas.width !== workCanvas.width ||
-      displayCanvas.height !== workCanvas.height
+      displayCanvas.width !== displayWidth ||
+      displayCanvas.height !== displayHeight
     ) {
-      displayCanvas.width = workCanvas.width
-      displayCanvas.height = workCanvas.height
+      displayCanvas.width = displayWidth
+      displayCanvas.height = displayHeight
     }
 
     context.clearRect(0, 0, displayCanvas.width, displayCanvas.height)
-    context.drawImage(workCanvas, 0, 0)
+    context.drawImage(workCanvas, cropPadding.x, cropPadding.y)
 
     const uiScale = getUiScale(displayCanvas)
 
@@ -197,18 +308,49 @@ function App() {
     }
 
     if (tool === 'rect' && selectionRect) {
-      drawMarqueeSelection(context, selectionRect, marqueePhase, uiScale)
+      drawMarqueeSelection(
+        context,
+        selectionRect,
+        marqueePhaseRef.current,
+        uiScale,
+      )
     }
 
     if (tool === 'crop' && cropDraft) {
       drawCropOverlay(
         context,
-        cropDraft,
+        {
+          ...cropDraft,
+          x: cropDraft.x + cropPadding.x,
+          y: cropDraft.y + cropPadding.y,
+        },
         displayCanvas.width,
         displayCanvas.height,
         uiScale,
       )
     }
+  }
+
+  const getEditorPoint = (event: PointerEvent<HTMLCanvasElement>) => {
+    const point = getCanvasPoint(event)
+
+    if (tool !== 'crop' || !imageMeta) {
+      return point
+    }
+
+    const padding = getCropPreviewPadding(imageMeta.width, imageMeta.height)
+    return { x: point.x - padding.x, y: point.y - padding.y }
+  }
+
+  const requestCanvasRedraw = () => {
+    if (drawFrameRef.current !== null) {
+      return
+    }
+
+    drawFrameRef.current = window.requestAnimationFrame(() => {
+      drawFrameRef.current = null
+      redrawCanvas()
+    })
   }
 
   const paintBrushSegment = (
@@ -217,10 +359,10 @@ function App() {
     toX: number,
     toY: number,
   ) => {
-    const workCanvas = workCanvasRef.current
-    const context = workCanvas?.getContext('2d')
+    const activeLayer = getActiveLayer()
+    const context = activeLayer?.canvas.getContext('2d')
 
-    if (!workCanvas || !context) {
+    if (!activeLayer || !context) {
       return
     }
 
@@ -228,46 +370,74 @@ function App() {
       mode: paintMode,
       color: activeColor,
       size: brushSize,
+      mosaicPixelSize,
+      mosaicSourceContext:
+        paintMode === 'mosaic'
+          ? workCanvasRef.current?.getContext('2d') ?? undefined
+          : undefined,
       from: { x: fromX, y: fromY },
       to: { x: toX, y: toY },
     })
+    compositeDirtyRef.current = true
   }
 
-  const clearUndoHistory = () => {
-    undoStackRef.current = []
-    setUndoCount(0)
+  const syncHistory = (entries: HistoryEntry[], index: number) => {
+    historyRef.current = entries
+    historyIndexRef.current = index
+    setHistoryItems(entries.map(({ id, label }) => ({ id, label })))
+    setHistoryIndex(index)
   }
 
-  const pushUndoSnapshot = () => {
-    const workCanvas = workCanvasRef.current
+  const captureHistoryEntry = (
+    label: string,
+    nextImageMeta = imageMeta,
+  ): HistoryEntry | null => {
+    if (!nextImageMeta || !activeLayerIdRef.current || !layersRef.current.length) {
+      return null
+    }
 
-    if (!workCanvas || !imageMeta) {
+    return {
+      id: createHistoryId(),
+      label,
+      layers: layersRef.current.map((layer) => ({ ...layer })),
+      imageMeta: { ...nextImageMeta },
+      activeLayerId: activeLayerIdRef.current,
+    }
+  }
+
+  const resetHistory = (label: string, nextImageMeta: ImageMeta) => {
+    const historyEntry = captureHistoryEntry(label, nextImageMeta)
+
+    if (!historyEntry) {
       return
     }
 
-    const snapshotCanvas = document.createElement('canvas')
-    copyCanvasContents(workCanvas, snapshotCanvas)
-    undoStackRef.current = [
-      ...undoStackRef.current,
-      {
-        canvas: snapshotCanvas,
-        imageMeta: { ...imageMeta },
-      },
-    ].slice(-40)
-    setUndoCount(undoStackRef.current.length)
+    syncHistory([historyEntry], 0)
   }
 
-  const undoLastChange = () => {
-    const workCanvas = workCanvasRef.current
-    const historyEntry = undoStackRef.current.pop()
+  const commitHistory = (label: string, nextImageMeta = imageMeta) => {
+    const historyEntry = captureHistoryEntry(label, nextImageMeta)
 
-    if (!workCanvas || !historyEntry) {
+    if (!historyEntry) {
       return
     }
 
-    copyCanvasContents(historyEntry.canvas, workCanvas)
+    const nextHistory = appendHistoryEntry(
+      historyRef.current,
+      historyIndexRef.current,
+      historyEntry,
+      HISTORY_LIMIT,
+    )
+    syncHistory(nextHistory.entries, nextHistory.index)
+  }
+
+  const restoreHistoryEntry = (historyEntry: HistoryEntry) => {
+    syncLayers(
+      historyEntry.layers.map((layer) => ({ ...layer })),
+      historyEntry.activeLayerId,
+    )
     interactionRef.current = IDLE_INTERACTION
-    setUndoCount(undoStackRef.current.length)
+    brushPreviewRef.current = null
     setSelectionRect(null)
     startTransition(() => {
       setImageMeta(historyEntry.imageMeta)
@@ -283,25 +453,49 @@ function App() {
       )
     })
     redrawCanvas()
-    setNotice('success', '이전 편집으로 되돌렸어요.')
+  }
+
+  const jumpToHistory = (index: number, message?: string) => {
+    const historyEntry = historyRef.current[index]
+
+    if (!historyEntry || index === historyIndexRef.current) {
+      return
+    }
+
+    historyIndexRef.current = index
+    setHistoryIndex(index)
+    restoreHistoryEntry(historyEntry)
+    setNotice('success', message ?? `'${historyEntry.label}' 시점으로 이동했어요.`)
+  }
+
+  const undoLastChange = () => {
+    jumpToHistory(historyIndexRef.current - 1, '이전 편집으로 되돌렸어요.')
+  }
+
+  const redoLastChange = () => {
+    jumpToHistory(historyIndexRef.current + 1, '다시 실행했어요.')
   }
 
   const setBrushPreview = (point: BrushPreviewPoint | null) => {
     brushPreviewRef.current = point
-    redrawCanvas()
+    requestCanvasRedraw()
   }
 
   const applySelectionAction = (mode: PaintMode) => {
-    const workCanvas = workCanvasRef.current
-    const context = workCanvas?.getContext('2d')
+    prepareActiveLayerForEdit()
+    const activeLayer = getActiveLayer()
+    const context = activeLayer?.canvas.getContext('2d')
 
-    if (!workCanvas || !context || !selectionRect) {
+    if (!activeLayer || !context || !selectionRect) {
       return
     }
 
-    pushUndoSnapshot()
     paintRect(context, selectionRect, mode, activeColor)
+    compositeDirtyRef.current = true
     redrawCanvas()
+    commitHistory(
+      mode === 'erase' ? '선택 영역 지우기' : '선택 영역 채우기',
+    )
     setNotice(
       'success',
       mode === 'erase' ? '선택 영역을 지웠어요.' : '선택 영역을 채웠어요.',
@@ -313,6 +507,77 @@ function App() {
     setNotice('info', '선택 영역을 해제했어요.')
   }
 
+  const selectLayer = (id: string) => {
+    activeLayerIdRef.current = id
+    setActiveLayerId(id)
+  }
+
+  const addLayer = () => {
+    if (!imageMeta) {
+      return
+    }
+
+    const layer: EditorLayer = {
+      id: createLayerId(),
+      name: `편집 ${layersRef.current.length}`,
+      visible: true,
+      canvas: createCanvas(imageMeta.width, imageMeta.height),
+    }
+    syncLayers([...layersRef.current, layer], layer.id)
+    redrawCanvas()
+    commitHistory('레이어 추가')
+    setNotice('success', '새 레이어를 추가했어요.')
+  }
+
+  const toggleLayerVisibility = (id: string) => {
+    const currentLayer = layersRef.current.find((layer) => layer.id === id)
+
+    if (!currentLayer) {
+      return
+    }
+
+    syncLayers(
+      layersRef.current.map((layer) =>
+        layer.id === id ? { ...layer, visible: !layer.visible } : layer,
+      ),
+    )
+    redrawCanvas()
+    commitHistory(
+      `${currentLayer.name} ${currentLayer.visible ? '숨기기' : '표시하기'}`,
+    )
+  }
+
+  const moveLayer = (id: string, offset: -1 | 1) => {
+    const currentIndex = layersRef.current.findIndex((layer) => layer.id === id)
+    const nextIndex = currentIndex + offset
+
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= layersRef.current.length) {
+      return
+    }
+
+    const nextLayers = [...layersRef.current]
+    ;[nextLayers[currentIndex], nextLayers[nextIndex]] = [
+      nextLayers[nextIndex],
+      nextLayers[currentIndex],
+    ]
+    syncLayers(nextLayers)
+    redrawCanvas()
+    commitHistory('레이어 순서 변경')
+  }
+
+  const removeLayer = (id: string) => {
+    if (layersRef.current.length <= 1) {
+      return
+    }
+
+    const layerName =
+      layersRef.current.find((layer) => layer.id === id)?.name ?? '레이어'
+    syncLayers(layersRef.current.filter((layer) => layer.id !== id))
+    redrawCanvas()
+    commitHistory(`${layerName} 삭제`)
+    setNotice('info', '레이어를 삭제했어요.')
+  }
+
   const exportableMetadata = metadataFields
     .map((field) => ({
       key: field.key.trim(),
@@ -321,7 +586,7 @@ function App() {
     .filter((field) => field.key)
 
   const exportEditedBlob = async () => {
-    const workCanvas = workCanvasRef.current
+    const workCanvas = renderComposite()
 
     if (!workCanvas) {
       throw new Error('No image loaded')
@@ -410,60 +675,58 @@ function App() {
     }
   }
 
-  const applyCrop = () => {
-    const workCanvas = workCanvasRef.current
-
-    if (!workCanvas || !cropDraft || !imageMeta) {
+  const applyCanvasRect = (rect: EditorRect, message: string) => {
+    if (!imageMeta) {
       return
     }
 
-    const nextCrop = sanitizeRect(cropDraft, workCanvas.width, workCanvas.height)
-    const croppedCanvas = document.createElement('canvas')
-    croppedCanvas.width = Math.round(nextCrop.width)
-    croppedCanvas.height = Math.round(nextCrop.height)
+    const width = Math.round(rect.width)
+    const height = Math.round(rect.height)
+    const offsetX = -Math.round(rect.x)
+    const offsetY = -Math.round(rect.y)
 
-    const croppedContext = croppedCanvas.getContext('2d')
-
-    if (!croppedContext) {
-      setNotice('error', '크롭을 적용하지 못했어요.')
-      return
-    }
-
-    pushUndoSnapshot()
-    croppedContext.drawImage(
-      workCanvas,
-      nextCrop.x,
-      nextCrop.y,
-      nextCrop.width,
-      nextCrop.height,
-      0,
-      0,
-      croppedCanvas.width,
-      croppedCanvas.height,
-    )
-
-    copyCanvasContents(croppedCanvas, workCanvas)
-
-    startTransition(() => {
-      setImageMeta((current) =>
-        current
-          ? {
-              ...current,
-              width: croppedCanvas.width,
-              height: croppedCanvas.height,
-            }
-          : current,
+    if (
+      width < 1 ||
+      height < 1 ||
+      width > MAX_IMAGE_DIMENSION ||
+      height > MAX_IMAGE_DIMENSION
+    ) {
+      setNotice(
+        'error',
+        `결과 크기는 각 변이 1~${MAX_IMAGE_DIMENSION}px 사이여야 해요.`,
       )
-      setCropDraft({
-        x: 0,
-        y: 0,
-        width: croppedCanvas.width,
-        height: croppedCanvas.height,
-      })
+      return
+    }
+
+    const nextLayers = layersRef.current.map((layer) => {
+      const canvas = createCanvas(width, height)
+      const context = canvas.getContext('2d')
+
+      if (!context) {
+        throw new Error('Layer canvas context unavailable')
+      }
+
+      context.drawImage(layer.canvas, offsetX, offsetY)
+      return { ...layer, canvas }
     })
 
+    syncLayers(nextLayers)
+    const nextImageMeta = { ...imageMeta, width, height }
+    startTransition(() => {
+      setImageMeta(nextImageMeta)
+      setCropDraft({ x: 0, y: 0, width, height })
+    })
     redrawCanvas()
-    setNotice('success', '크롭을 적용했어요.')
+    commitHistory('크롭', nextImageMeta)
+    setNotice('success', message)
+  }
+
+  const applyCrop = () => {
+    if (!cropDraft || !imageMeta) {
+      return
+    }
+
+    applyCanvasRect(cropDraft, '크롭을 적용했어요.')
   }
 
   const cancelCrop = () => {
@@ -474,25 +737,21 @@ function App() {
 
   const resetEditor = () => {
     const originalCanvas = originalCanvasRef.current
-    const workCanvas = workCanvasRef.current
 
-    if (!originalCanvas || !workCanvas || !imageMeta) {
+    if (!originalCanvas || !imageMeta) {
       return
     }
 
-    pushUndoSnapshot()
-    copyCanvasContents(originalCanvas, workCanvas)
+    const initialLayers = createInitialLayers(originalCanvas)
+    syncLayers(initialLayers.layers, initialLayers.activeLayerId)
+    const nextImageMeta = {
+      ...imageMeta,
+      width: originalCanvas.width,
+      height: originalCanvas.height,
+    }
 
     startTransition(() => {
-      setImageMeta((current) =>
-        current
-          ? {
-              ...current,
-              width: originalCanvas.width,
-              height: originalCanvas.height,
-            }
-          : current,
-      )
+      setImageMeta(nextImageMeta)
       setSelectionRect(null)
       setCropDraft(
         tool === 'crop'
@@ -508,6 +767,7 @@ function App() {
 
     interactionRef.current = IDLE_INTERACTION
     redrawCanvas()
+    commitHistory('처음 상태로 복원', nextImageMeta)
     setNotice('info', '처음 상태로 되돌렸어요.')
   }
 
@@ -622,11 +882,20 @@ function App() {
       originalContext.imageSmoothingQuality = 'high'
       originalContext.drawImage(decodedImage, 0, 0, width, height)
 
-      const workCanvas = getOffscreenCanvas(workCanvasRef)
-      copyCanvasContents(originalCanvas, workCanvas)
+      const initialLayers = createInitialLayers(originalCanvas)
+      syncLayers(initialLayers.layers, initialLayers.activeLayerId)
       const editableMetadata = toEditableMetadataFields(extractedMetadata)
+      const nextImageMeta: ImageMeta = {
+        name: blob instanceof File && blob.name ? blob.name : sourceLabel,
+        source: sourceLabel,
+        width,
+        height,
+        originalWidth: naturalWidth,
+        originalHeight: naturalHeight,
+        scaledDown: scaled,
+      }
       brushPreviewRef.current = null
-      clearUndoHistory()
+      resetHistory('이미지 열기', nextImageMeta)
 
       startTransition(() => {
         setTool('brush')
@@ -635,15 +904,7 @@ function App() {
         setCropDraft(null)
         setSourceMetadataFields(editableMetadata)
         setMetadataFields(cloneMetadataFields(editableMetadata))
-        setImageMeta({
-          name: blob instanceof File && blob.name ? blob.name : sourceLabel,
-          source: sourceLabel,
-          width,
-          height,
-          originalWidth: naturalWidth,
-          originalHeight: naturalHeight,
-          scaledDown: scaled,
-        })
+        setImageMeta(nextImageMeta)
       })
 
       redrawCanvas()
@@ -676,6 +937,20 @@ function App() {
   }, [])
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    window.localStorage.setItem('simple-edit-theme', theme)
+  }, [theme])
+
+  useEffect(
+    () => () => {
+      if (drawFrameRef.current !== null) {
+        window.cancelAnimationFrame(drawFrameRef.current)
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
     if (!status) {
       return
     }
@@ -694,7 +969,6 @@ function App() {
     activeColor,
     cropDraft,
     imageMeta,
-    marqueePhase,
     paintMode,
     selectionRect,
     tool,
@@ -711,6 +985,10 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (displayCanvasRef.current) {
+      displayCanvasRef.current.style.cursor = ''
+    }
+
     if (!imageMeta) {
       setSelectionRect(null)
       setCropDraft(null)
@@ -738,17 +1016,25 @@ function App() {
     }
   }, [imageMeta, tool])
 
+  const animateSelectionCanvas = useEffectEvent((time: number) => {
+    marqueePhaseRef.current = (time / 55) % 16
+    redrawCanvas()
+  })
+
   useEffect(() => {
     if (tool !== 'rect' || !selectionRect) {
-      setMarqueePhase(0)
+      marqueePhaseRef.current = 0
       return
     }
 
-    const interval = window.setInterval(() => {
-      setMarqueePhase((current) => (current + 1) % 16)
-    }, 110)
+    let frame = 0
+    const animate = (time: number) => {
+      animateSelectionCanvas(time)
+      frame = window.requestAnimationFrame(animate)
+    }
+    frame = window.requestAnimationFrame(animate)
 
-    return () => window.clearInterval(interval)
+    return () => window.cancelAnimationFrame(frame)
   }, [selectionRect, tool])
 
   const onGlobalPaste = useEffectEvent((event: ClipboardEvent) => {
@@ -794,7 +1080,22 @@ function App() {
       return
     }
 
-    if ((event.metaKey || event.ctrlKey) && key === 'z' && imageMeta) {
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      imageMeta &&
+      (key === 'y' || (key === 'z' && event.shiftKey))
+    ) {
+      event.preventDefault()
+      redoLastChange()
+      return
+    }
+
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      key === 'z' &&
+      !event.shiftKey &&
+      imageMeta
+    ) {
       event.preventDefault()
       undoLastChange()
       return
@@ -867,11 +1168,11 @@ function App() {
     }
 
     event.preventDefault()
-    const point = getCanvasPoint(event)
+    const point = getEditorPoint(event)
     event.currentTarget.setPointerCapture(event.pointerId)
 
     if (tool === 'brush') {
-      pushUndoSnapshot()
+      prepareActiveLayerForEdit()
       setBrushPreview(point)
       paintBrushSegment(point.x, point.y, point.x, point.y)
       interactionRef.current = {
@@ -880,7 +1181,7 @@ function App() {
         lastX: point.x,
         lastY: point.y,
       }
-      redrawCanvas()
+      requestCanvasRedraw()
       return
     }
 
@@ -922,13 +1223,10 @@ function App() {
       } satisfies EditorRect)
     const uiScale = getUiScale(event.currentTarget)
     const mode = hitCropHandle(point.x, point.y, currentCrop, 28 * uiScale) ?? 'new'
+    event.currentTarget.style.cursor = getCropCursor(mode)
     const startRect =
       mode === 'new'
-        ? sanitizeRect(
-            { x: point.x, y: point.y, width: 1, height: 1 },
-            imageMeta.width,
-            imageMeta.height,
-          )
+        ? { x: point.x, y: point.y, width: 1, height: 1 }
         : currentCrop
 
     interactionRef.current = {
@@ -946,7 +1244,7 @@ function App() {
   }
 
   const handleCanvasPointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
-    const point = getCanvasPoint(event)
+    const point = getEditorPoint(event)
 
     if (tool === 'brush') {
       brushPreviewRef.current = point
@@ -954,12 +1252,19 @@ function App() {
 
     const activeInteraction = interactionRef.current
 
+    if (tool === 'crop' && cropDraft && activeInteraction.kind === 'idle') {
+      const uiScale = getUiScale(event.currentTarget)
+      event.currentTarget.style.cursor = getCropCursor(
+        hitCropHandle(point.x, point.y, cropDraft, 28 * uiScale),
+      )
+    }
+
     if (
       activeInteraction.kind === 'idle' ||
       activeInteraction.pointerId !== event.pointerId
     ) {
       if (tool === 'brush') {
-        redrawCanvas()
+        requestCanvasRedraw()
       }
       return
     }
@@ -967,18 +1272,28 @@ function App() {
     event.preventDefault()
 
     if (activeInteraction.kind === 'brush') {
-      paintBrushSegment(
-        activeInteraction.lastX,
-        activeInteraction.lastY,
-        point.x,
-        point.y,
-      )
+      let lastX = activeInteraction.lastX
+      let lastY = activeInteraction.lastY
+      const pointerEvents = event.nativeEvent.getCoalescedEvents?.() ?? [
+        event.nativeEvent,
+      ]
+
+      pointerEvents.forEach((pointerEvent) => {
+        const nextPoint = getCanvasPointFromClient(
+          event.currentTarget,
+          pointerEvent.clientX,
+          pointerEvent.clientY,
+        )
+        paintBrushSegment(lastX, lastY, nextPoint.x, nextPoint.y)
+        lastX = nextPoint.x
+        lastY = nextPoint.y
+      })
       interactionRef.current = {
         ...activeInteraction,
-        lastX: point.x,
-        lastY: point.y,
+        lastX,
+        lastY,
       }
-      redrawCanvas()
+      requestCanvasRedraw()
       return
     }
 
@@ -1022,6 +1337,7 @@ function App() {
           point.y,
           imageMeta.width,
           imageMeta.height,
+          true,
         ),
       )
     }
@@ -1041,10 +1357,24 @@ function App() {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
 
-    const point = getCanvasPoint(event)
+    const point = getEditorPoint(event)
 
-    if (tool === 'brush') {
+    if (activeInteraction.kind === 'brush') {
+      paintBrushSegment(
+        activeInteraction.lastX,
+        activeInteraction.lastY,
+        point.x,
+        point.y,
+      )
       brushPreviewRef.current = point
+      requestCanvasRedraw()
+      commitHistory(
+        paintMode === 'mosaic'
+          ? '모자이크'
+          : paintMode === 'erase'
+            ? '지우기'
+            : '칠하기',
+      )
     }
 
     if (activeInteraction.kind === 'rect' && imageMeta) {
@@ -1086,6 +1416,7 @@ function App() {
           point.y,
           imageMeta.width,
           imageMeta.height,
+          true,
         ),
       )
     }
@@ -1094,18 +1425,29 @@ function App() {
   }
 
   const cancelPointerInteraction = (event: PointerEvent<HTMLCanvasElement>) => {
+    const activeInteraction = interactionRef.current
+
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
 
     interactionRef.current = IDLE_INTERACTION
-    redrawCanvas()
+    if (activeInteraction.kind === 'brush') {
+      commitHistory(
+        paintMode === 'mosaic'
+          ? '모자이크'
+          : paintMode === 'erase'
+            ? '지우기'
+            : '칠하기',
+      )
+    }
+    requestCanvasRedraw()
   }
 
   const handleCanvasPointerLeave = () => {
     if (interactionRef.current.kind === 'idle') {
       brushPreviewRef.current = null
-      redrawCanvas()
+      requestCanvasRedraw()
     }
   }
 
@@ -1143,7 +1485,7 @@ function App() {
 
   const toolHint =
     tool === 'crop'
-      ? '핸들을 끌어 크롭 영역을 조정하세요.'
+      ? '핸들을 이미지 밖으로 끌어 캔버스를 늘릴 수 있어요.'
       : tool === 'rect'
         ? '드래그로 선택한 뒤 채우거나 지우세요.'
         : paintMode === 'mosaic'
@@ -1151,6 +1493,9 @@ function App() {
         : paintMode === 'erase'
           ? '브러시로 바로 지울 수 있어요.'
           : '브러시로 바로 칠할 수 있어요.'
+
+  const undoCount = Math.max(historyIndex, 0)
+  const redoCount = Math.max(historyItems.length - historyIndex - 1, 0)
 
   return (
     <div className="app-shell">
@@ -1170,24 +1515,41 @@ function App() {
                 <p className="brand-label">Simple Edit</p>
                 <h1>빠르게 가리고 복사</h1>
               </div>
-              <a
-                className="github-link"
-                href="https://github.com/Craft374/simple_edit"
-                target="_blank"
-                rel="noreferrer"
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                  className="github-link__icon"
+              <div className="head-actions">
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label={theme === 'dark' ? '라이트 모드 켜기' : '다크 모드 켜기'}
+                  title={theme === 'dark' ? '라이트 모드' : '다크 모드'}
+                  onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
                 >
-                  <path
-                    fill="currentColor"
-                    d="M12 1.25a10.75 10.75 0 0 0-3.4 20.95c.54.1.73-.23.73-.52 0-.25-.01-1.08-.02-1.96-2.98.65-3.6-1.26-3.6-1.26-.48-1.22-1.18-1.54-1.18-1.54-.97-.66.08-.65.08-.65 1.07.08 1.63 1.1 1.63 1.1.96 1.63 2.5 1.16 3.11.89.1-.69.38-1.17.68-1.44-2.38-.27-4.88-1.19-4.88-5.29 0-1.17.42-2.12 1.1-2.87-.11-.27-.48-1.37.11-2.86 0 0 .9-.29 2.95 1.1A10.2 10.2 0 0 1 12 6.42c.91 0 1.82.12 2.68.35 2.05-1.39 2.95-1.1 2.95-1.1.59 1.49.22 2.59.11 2.86.68.75 1.1 1.7 1.1 2.87 0 4.11-2.5 5.01-4.89 5.28.39.34.73 1 .73 2.03 0 1.47-.01 2.66-.01 3.02 0 .29.19.63.74.52A10.75 10.75 0 0 0 12 1.25Z"
-                  />
-                </svg>
-                <span>GitHub</span>
-              </a>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d={
+                        theme === 'dark'
+                          ? 'M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z'
+                          : 'M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z'
+                      }
+                    />
+                  </svg>
+                </button>
+                <a
+                  className="icon-button"
+                  href="https://github.com/Craft374/simple_edit"
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="GitHub 저장소 열기"
+                  title="GitHub"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      fill="currentColor"
+                      stroke="none"
+                      d="M12 1.25a10.75 10.75 0 0 0-3.4 20.95c.54.1.73-.23.73-.52 0-.25-.01-1.08-.02-1.96-2.98.65-3.6-1.26-3.6-1.26-.48-1.22-1.18-1.54-1.18-1.54-.97-.66.08-.65.08-.65 1.07.08 1.63 1.1 1.63 1.1.96 1.63 2.5 1.16 3.11.89.1-.69.38-1.17.68-1.44-2.38-.27-4.88-1.19-4.88-5.29 0-1.17.42-2.12 1.1-2.87-.11-.27-.48-1.37.11-2.86 0 0 .9-.29 2.95 1.1A10.2 10.2 0 0 1 12 6.42c.91 0 1.82.12 2.68.35 2.05-1.39 2.95-1.1 2.95-1.1.59 1.49.22 2.59.11 2.86.68.75 1.1 1.7 1.1 2.87 0 4.11-2.5 5.01-4.89 5.28.39.34.73 1 .73 2.03 0 1.47-.01 2.66-.01 3.02 0 .29.19.63.74.52A10.75 10.75 0 0 0 12 1.25Z"
+                    />
+                  </svg>
+                </a>
+              </div>
             </div>
             <p className="meta-line">
               {imageMeta
@@ -1222,7 +1584,15 @@ function App() {
                 onClick={undoLastChange}
                 disabled={!undoCount}
               >
-                되돌리기
+                실행 취소{undoCount ? ` ${undoCount}` : ''}
+              </button>
+              <button
+                type="button"
+                className="action-button"
+                onClick={redoLastChange}
+                disabled={!redoCount}
+              >
+                다시 실행{redoCount ? ` ${redoCount}` : ''}
               </button>
               <button
                 type="button"
@@ -1242,6 +1612,15 @@ function App() {
               onClick={() => setActiveTab('edit')}
             >
               편집
+            </button>
+            <button
+              type="button"
+              className={
+                activeTab === 'history' ? 'tab-button active' : 'tab-button'
+              }
+              onClick={() => setActiveTab('history')}
+            >
+              히스토리
             </button>
             <button
               type="button"
@@ -1329,6 +1708,26 @@ function App() {
                       value={brushSize}
                       onChange={(event) => setBrushSize(Number(event.target.value))}
                     />
+
+                    {paintMode === 'mosaic' && (
+                      <>
+                        <label className="slider-row">
+                          <span>픽셀 크기</span>
+                          <strong>{mosaicPixelSize}px</strong>
+                        </label>
+                        <input
+                          className="slider"
+                          type="range"
+                          min="2"
+                          max="64"
+                          step="1"
+                          value={mosaicPixelSize}
+                          onChange={(event) =>
+                            setMosaicPixelSize(Number(event.target.value))
+                          }
+                        />
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -1387,10 +1786,97 @@ function App() {
                       </button>
                     </div>
                     <p className="helper-line">
-                      코너 핸들과 중간 핸들을 끌어 조정하고 <strong>Enter</strong>로
-                      적용할 수 있어요.
+                      포토샵처럼 핸들을 이미지 밖으로 끌면 투명 영역이 늘어납니다.
+                      {' '}<strong>Enter</strong>로 적용할 수 있어요.
                     </p>
                   </div>
+                )}
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <p className="panel-title">레이어</p>
+                  <button
+                    type="button"
+                    className="text-button text-button--accent"
+                    onClick={addLayer}
+                    disabled={!imageMeta}
+                  >
+                    + 추가
+                  </button>
+                </div>
+
+                {layers.length ? (
+                  <div className="layer-list">
+                    {[...layers].reverse().map((layer) => {
+                      const layerIndex = layers.findIndex(
+                        (entry) => entry.id === layer.id,
+                      )
+
+                      return (
+                        <div
+                          key={layer.id}
+                          className={
+                            activeLayerId === layer.id
+                              ? 'layer-row active'
+                              : 'layer-row'
+                          }
+                        >
+                          <button
+                            type="button"
+                            className="layer-visibility"
+                            aria-label={
+                              layer.visible
+                                ? `${layer.name} 숨기기`
+                                : `${layer.name} 표시하기`
+                            }
+                            title={layer.visible ? '숨기기' : '표시하기'}
+                            onClick={() => toggleLayerVisibility(layer.id)}
+                          >
+                            {layer.visible ? '●' : '○'}
+                          </button>
+                          <button
+                            type="button"
+                            className="layer-name"
+                            onClick={() => selectLayer(layer.id)}
+                          >
+                            {layer.name}
+                          </button>
+                          <div className="layer-actions">
+                            <button
+                              type="button"
+                              aria-label={`${layer.name} 위로 이동`}
+                              title="위로"
+                              onClick={() => moveLayer(layer.id, 1)}
+                              disabled={layerIndex === layers.length - 1}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`${layer.name} 아래로 이동`}
+                              title="아래로"
+                              onClick={() => moveLayer(layer.id, -1)}
+                              disabled={layerIndex === 0}
+                            >
+                              ↓
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`${layer.name} 삭제`}
+                              title="삭제"
+                              onClick={() => removeLayer(layer.id)}
+                              disabled={layers.length <= 1}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="helper-line">이미지를 열면 레이어가 표시됩니다.</p>
                 )}
               </section>
 
@@ -1459,6 +1945,7 @@ function App() {
                 <p>{modifierLabel}+V 붙여넣기</p>
                 <p>{modifierLabel}+C 결과 복사</p>
                 <p>{modifierLabel}+Z 되돌리기</p>
+                <p>{modifierLabel}+Shift+Z 다시 실행</p>
                 <p>Delete 선택 지우기</p>
                 <p>
                   {supportsClipboardRead && supportsClipboardWrite
@@ -1473,6 +1960,51 @@ function App() {
                 >
                   처음 상태로 되돌리기
                 </button>
+              </section>
+            </>
+          ) : activeTab === 'history' ? (
+            <>
+              <section className="panel">
+                <div className="panel-head">
+                  <p className="panel-title">히스토리</p>
+                  <span>
+                    {historyItems.length ? `${historyIndex + 1}/${historyItems.length}` : '기록 없음'}
+                  </span>
+                </div>
+
+                {historyItems.length ? (
+                  <div className="history-list">
+                    {historyItems.map((item, index) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={
+                          index === historyIndex
+                            ? 'history-item active'
+                            : index > historyIndex
+                              ? 'history-item future'
+                              : 'history-item'
+                        }
+                        onClick={() => jumpToHistory(index)}
+                      >
+                        <span className="history-step">{index + 1}</span>
+                        <span className="history-label">{item.label}</span>
+                        {index === historyIndex && (
+                          <span className="history-current">현재</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="metadata-empty">
+                    이미지를 열고 편집하면 작업 기록이 여기에 쌓입니다.
+                  </div>
+                )}
+              </section>
+
+              <section className="panel panel--muted">
+                <p>항목을 누르면 해당 작업 시점으로 바로 이동합니다.</p>
+                <p>과거 시점에서 새로 편집하면 이후 기록은 교체됩니다.</p>
               </section>
             </>
           ) : (
@@ -1591,6 +2123,10 @@ function App() {
 
                 <div className="canvas-hud canvas-hud--top">
                   <span>{tool === 'rect' ? '사각형 선택' : tool === 'crop' ? '크롭' : '브러시'}</span>
+                  <span>
+                    {layers.find((layer) => layer.id === activeLayerId)?.name ??
+                      '레이어 없음'}
+                  </span>
                   {tool === 'rect' && selectionRect && (
                     <span>
                       {Math.round(selectionRect.width)} x {Math.round(selectionRect.height)}
@@ -1644,19 +2180,51 @@ function App() {
 }
 
 function getCanvasPoint(event: PointerEvent<HTMLCanvasElement>) {
-  const canvas = event.currentTarget
+  return getCanvasPointFromClient(
+    event.currentTarget,
+    event.clientX,
+    event.clientY,
+  )
+}
+
+function getCanvasPointFromClient(
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number,
+) {
   const bounds = canvas.getBoundingClientRect()
   const scaleX = canvas.width / bounds.width
   const scaleY = canvas.height / bounds.height
 
   return {
-    x: clamp((event.clientX - bounds.left) * scaleX, 0, canvas.width),
-    y: clamp((event.clientY - bounds.top) * scaleY, 0, canvas.height),
+    x: clamp((clientX - bounds.left) * scaleX, 0, canvas.width),
+    y: clamp((clientY - bounds.top) * scaleY, 0, canvas.height),
   }
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
+}
+
+function getCropPreviewPadding(width: number, height: number) {
+  const getPadding = (dimension: number) =>
+    Math.round(
+      Math.min(
+        420,
+        Math.max(72, dimension * 0.22),
+        Math.max(0, MAX_IMAGE_DIMENSION - dimension),
+      ),
+    )
+
+  return { x: getPadding(width), y: getPadding(height) }
+}
+
+function getCropCursor(handle: CropHandle | null) {
+  if (handle === 'n' || handle === 's') return 'ns-resize'
+  if (handle === 'e' || handle === 'w') return 'ew-resize'
+  if (handle === 'ne' || handle === 'sw') return 'nesw-resize'
+  if (handle === 'nw' || handle === 'se') return 'nwse-resize'
+  return handle === 'move' ? 'move' : 'crosshair'
 }
 
 async function decodeImageBlob(blob: Blob): Promise<DecodedImage> {
@@ -1730,6 +2298,59 @@ function toEditableMetadataFields(fields: MetadataField[]) {
 
 function cloneMetadataFields(fields: EditableMetadataField[]) {
   return fields.map((field) => createMetadataField(field.key, field.value))
+}
+
+function createCanvas(width: number, height: number) {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  return canvas
+}
+
+function createInitialLayers(sourceCanvas: HTMLCanvasElement) {
+  const originalLayer: EditorLayer = {
+    id: createLayerId(),
+    name: '원본',
+    visible: true,
+    canvas: createCanvas(sourceCanvas.width, sourceCanvas.height),
+  }
+  copyCanvasContents(sourceCanvas, originalLayer.canvas)
+
+  const editLayer: EditorLayer = {
+    id: createLayerId(),
+    name: '편집 1',
+    visible: true,
+    canvas: createCanvas(sourceCanvas.width, sourceCanvas.height),
+  }
+
+  return {
+    layers: [originalLayer, editLayer],
+    activeLayerId: editLayer.id,
+  }
+}
+
+function createLayerId() {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `layer-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function createHistoryId() {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `history-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function getInitialTheme(): Theme {
+  const savedTheme = window.localStorage.getItem('simple-edit-theme')
+
+  if (savedTheme === 'light' || savedTheme === 'dark') {
+    return savedTheme
+  }
+
+  return window.matchMedia('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light'
 }
 
 export default App

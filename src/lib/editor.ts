@@ -24,6 +24,8 @@ type StrokeOptions = {
   mode: PaintMode
   color: string
   size: number
+  mosaicPixelSize?: number
+  mosaicSourceContext?: CanvasRenderingContext2D
   from: { x: number; y: number }
   to: { x: number; y: number }
 }
@@ -149,6 +151,16 @@ export function fitDimensionsToLimit(
   }
 }
 
+export function appendHistoryEntry<T>(
+  entries: T[],
+  index: number,
+  entry: T,
+  limit: number,
+) {
+  const nextEntries = [...entries.slice(0, index + 1), entry].slice(-limit)
+  return { entries: nextEntries, index: nextEntries.length - 1 }
+}
+
 export function copyCanvasContents(
   sourceCanvas: HTMLCanvasElement,
   targetCanvas: HTMLCanvasElement,
@@ -234,9 +246,68 @@ export function updateCropRect(
   currentY: number,
   boundsWidth: number,
   boundsHeight: number,
+  allowOutside = false,
 ): EditorRect {
   const minWidth = Math.min(MIN_CROP_SIZE, boundsWidth)
   const minHeight = Math.min(MIN_CROP_SIZE, boundsHeight)
+
+  if (allowOutside) {
+    if (mode === 'new') {
+      const rect = normalizeRect(startX, startY, currentX, currentY)
+      return {
+        ...rect,
+        width: clamp(rect.width, minWidth, MAX_IMAGE_DIMENSION),
+        height: clamp(rect.height, minHeight, MAX_IMAGE_DIMENSION),
+      }
+    }
+
+    if (mode === 'move') {
+      return {
+        ...startRect,
+        x: startRect.x + (currentX - startX),
+        y: startRect.y + (currentY - startY),
+      }
+    }
+
+    let left = startRect.x
+    let top = startRect.y
+    let right = startRect.x + startRect.width
+    let bottom = startRect.y + startRect.height
+
+    if (mode.includes('w')) {
+      left = clamp(
+        startRect.x + (currentX - startX),
+        right - MAX_IMAGE_DIMENSION,
+        right - minWidth,
+      )
+    }
+
+    if (mode.includes('e')) {
+      right = clamp(
+        startRect.x + startRect.width + (currentX - startX),
+        left + minWidth,
+        left + MAX_IMAGE_DIMENSION,
+      )
+    }
+
+    if (mode.includes('n')) {
+      top = clamp(
+        startRect.y + (currentY - startY),
+        bottom - MAX_IMAGE_DIMENSION,
+        bottom - minHeight,
+      )
+    }
+
+    if (mode.includes('s')) {
+      bottom = clamp(
+        startRect.y + startRect.height + (currentY - startY),
+        top + minHeight,
+        top + MAX_IMAGE_DIMENSION,
+      )
+    }
+
+    return { x: left, y: top, width: right - left, height: bottom - top }
+  }
 
   if (mode === 'new') {
     return sanitizeRect(
@@ -332,7 +403,10 @@ function paintMosaicStroke(
   context: CanvasRenderingContext2D,
   options: StrokeOptions,
 ) {
-  const blockSize = Math.max(4, Math.round(options.size / 6))
+  const blockSize = Math.max(
+    2,
+    Math.round(options.mosaicPixelSize ?? options.size / 6),
+  )
   const radius = options.size / 2
   const left = Math.max(
     0,
@@ -360,7 +434,14 @@ function paintMosaicStroke(
   }
 
   const imageData = context.getImageData(left, top, right - left, bottom - top)
-  const source = new Uint8ClampedArray(imageData.data)
+  const source = new Uint8ClampedArray(
+    (options.mosaicSourceContext ?? context).getImageData(
+      left,
+      top,
+      right - left,
+      bottom - top,
+    ).data,
+  )
   const segmentX = options.to.x - options.from.x
   const segmentY = options.to.y - options.from.y
   const segmentLengthSquared = segmentX ** 2 + segmentY ** 2
